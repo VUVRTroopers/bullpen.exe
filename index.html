@@ -3427,7 +3427,8 @@ body:not(.career) .careeronly { display: none !important; }
     const dbg = makeDebug(colors);
     dbg.g.visible = false;
     g.add(dbg.g);
-    const fig = { g, body, bones, mats, trimMat, glossMat, gearMat, gear, glove, num, blob, dbg, role, gloveHand: o.gloveHand || 'l', team: null, J: null, prev: null, blend: null, lastT: 0, debug: false };
+    const fig = { g, body, bones, mats, trimMat, glossMat, gearMat, gear, glove, num, blob, dbg, role, gloveHand: o.gloveHand || 'l', team: null, J: null, prev: null, blend: null, lastT: 0, debug: false,
+      seed: ++SEED * 0.6180339887 + (o.number || 0) * 0.0137, ease: {} };
     setTeam(fig, colors);
     return fig;
   }
@@ -3456,9 +3457,11 @@ body:not(.career) .careeronly { display: none !important; }
     for (const key of JOINTS) out[key] = U.lerpV(A[key], B[key], k);
     out.f = U.norm(U.lerpV(A.f, B.f, k)); out.r = U.norm(U.lerpV(A.r, B.r, k));
     out.noGlove = B.noGlove;
+    out.look = (A.look || 0) + ((B.look || 0) - (A.look || 0)) * k; out.nod = (A.nod || 0) + ((B.nod || 0) - (A.nod || 0)) * k;
     return out;
   };
   const BLEND = 0.24;
+  const _e = new THREE.Euler(), _q = new THREE.Quaternion();
   function poseFigure(fig, J) {
     if (!J) { fig.g.visible = false; return; }
     fig.g.visible = true;
@@ -3485,6 +3488,9 @@ body:not(.career) .careeronly { display: none !important; }
       boneFrame(i, T, f3, tmpFrame);
       const b = fig.bones[i];
       b.position.copy(tmpFrame.pos); b.quaternion.copy(tmpFrame.quat);
+      // head turn on top of the shoulders' frame: yaw about the neck (look, + = clockwise from above, the
+      // same sense as a heading) and a nod (+ = chin down); the cap, helmet and mask ride along
+      if (i === BI.head && (S.look || S.nod)) { _e.set(-(S.nod || 0), -(S.look || 0), 0, 'YXZ'); b.quaternion.multiply(_q.setFromEuler(_e)); }
       const s = BONES[i][3] === 'foot' ? 1 : tmpFrame.len / rig.restLen[i];
       b.scale.set(1, s, 1);
     }
@@ -3508,9 +3514,151 @@ body:not(.career) .careeronly { display: none !important; }
     fig.blob.material.opacity = 0.8 / (1 + lift * 6);
     fig.blob.visible = true;
   }
+  // ================================================================= life: idle motion
+  /* Small layered motion so nobody stands frozen between pitches: breathing, a slow weight shift over planted
+   * feet, glances that hold and then move like real eye-and-head turns, and a fidget per role. Everything is
+   * added on top of the procedural pose and scaled by amt, which callers fade to zero whenever the physics owns
+   * a joint (the delivery, the swing, a run), so release points, bat paths and catches stay exact.
+   * The clock is wall time, so players keep breathing while the game waits for you. */
+  let SEED = 0;
+  const TAU = Math.PI * 2;
+  const fract = (x) => x - Math.floor(x);
+  const hash = (n) => fract(Math.sin(n * 127.1 + 311.7) * 43758.5453);
+  // hold-and-move signal in [-1, 1]: holds a value, then eases to the next over the last part of each segment
+  function glance(t, seed, period, move = 0.16) {
+    const x = t / period + hash(seed);
+    const i = Math.floor(x), f = x - i;
+    const a = hash(seed * 13.7 + i) * 2 - 1, b = hash(seed * 13.7 + i + 1) * 2 - 1;
+    return a + (b - a) * U.smoothstep(1 - move, 1, f);
+  }
+  // a smooth 0→1→0 bump of length dur, once per period (offset per player); 0 the rest of the time
+  function every(t, seed, period, dur) {
+    const P = period * (0.8 + 0.4 * hash(seed + 0.3));
+    const f = fract(t / P + hash(seed)) * P;
+    if (f > dur) return { e: 0, tau: f };
+    const k = f / dur;
+    return { e: U.smoothstep(0, 0.25, k) * (1 - U.smoothstep(0.7, 1, k)), tau: f };
+  }
+  const now = () => performance.now() / 1000;
+  // ease a per-figure value toward a target (frame-rate independent)
+  function ease(fig, key, target, dt, rate = 5) {
+    const e = fig.ease;
+    if (e[key] == null || !(dt > 0)) { e[key] = target; return target; }
+    e[key] += (target - e[key]) * (1 - Math.exp(-dt * rate));
+    return e[key];
+  }
+  // turn the head toward a physics-space point (k blends it in), clamped to a human neck's range
+  function gaze(J, p, k = 1, max = 1.35) {
+    if (!p || k <= 0) return J;
+    const hd = J.head, dx = p[0] - hd[0], dy = p[1] - hd[1];
+    const want = Math.atan2(dx, dy), face = Math.atan2(J.f[0], J.f[1]);
+    let d = want - face; d = Math.atan2(Math.sin(d), Math.cos(d));
+    J.look = (J.look || 0) + U.clamp(d, -max, max) * k;
+    // the head's rest frame leans with the trunk (a crouch, a delivery), so take that pitch back out
+    const nk = U.sub(hd, J.neck), lean = Math.atan2(U.dot(nk, J.f), nk[2]);
+    J.nod = (J.nod || 0) + U.clamp(Math.atan2(hd[2] - (p[2] != null ? p[2] : hd[2]), Math.hypot(dx, dy)) - lean, -0.45, 0.45) * k;
+    return J;
+  }
+  const add = (J, key, v) => { J[key] = [J[key][0] + v[0], J[key][1] + v[1], J[key][2] + v[2]]; };
+  // move a hand toward a target with a natural elbow (out to the side and down)
+  function reach(J, s, target, k, sideSign) {
+    if (k <= 0) return;
+    const H = s + 'Hand', E = s + 'Elbow', Sh = s + 'Sh';
+    J[H] = U.lerpV(J[H], target, k);
+    const mid = U.lerpV(J[Sh], J[H], 0.5);
+    J[E] = U.lerpV(J[E], U.add(mid, U.add(U.scale(J.r, sideSign * 0.07), [0, 0, -0.07])), k);
+  }
+  /* o: { amt (0..1), style, free: hands that hang free ('l'/'r'), sway (scale), look (glance range, rad),
+   *      ready (0..1: set for the pitch, so glances settle and fidgets stop), h } */
+  function idle(fig, J, o = {}) {
+    const amt = o.amt == null ? 1 : U.clamp(o.amt, 0, 1);
+    if (amt <= 1e-3) return J;
+    const sd = fig.seed || 0, t = now() + sd * 37.1;
+    const r = J.r, f = J.f, ready = o.ready || 0;
+    // breathing (3.6–4.6 s) lifts the chest, shoulders and head a few millimetres
+    const br = Math.sin((TAU * t) / (3.6 + hash(sd + 1)));
+    // weight shift (6.5–9.5 s, two partials so it never looks metronomic) over feet that stay planted
+    const Tw = 6.5 + 3 * hash(sd + 2);
+    const ws = (0.65 * Math.sin((TAU * t) / Tw) + 0.35 * Math.sin((TAU * t) / (Tw * 0.43) + 1.7)) * amt * (o.sway != null ? o.sway : 1) * (1 - 0.6 * ready);
+    const lat = (k) => U.scale(r, ws * k);
+    for (const key of ['pelvis', 'lHip', 'rHip']) add(J, key, lat(0.016));
+    add(J, 'lKnee', lat(0.008)); add(J, 'rKnee', lat(0.008));
+    const up = (k) => U.add(lat(0.011), [0, 0, br * k * amt]);
+    add(J, 'neck', up(0.006)); add(J, 'head', up(0.0065));
+    add(J, 'lSh', up(0.0045)); add(J, 'rSh', up(0.0045));
+    // free hands hang and drift a little with the body
+    for (const s of o.free || []) {
+      const sw = Math.sin((TAU * t) / (2.9 + hash(sd + (s === 'l' ? 4 : 5))) + (s === 'l' ? 0 : 1.3)) * 0.008 * amt;
+      const d = U.add(up(0.003), U.scale(f, sw));
+      add(J, s + 'Hand', d); add(J, s + 'Elbow', U.scale(d, 0.6));
+    }
+    // glances: hold, then turn (narrower and calmer once the player is set for the pitch)
+    const range = (o.look != null ? o.look : 0.3) * amt * (1 - 0.85 * ready);
+    J.look = (J.look || 0) + glance(t, sd + 3, 3.4 + 1.6 * hash(sd + 6)) * range;
+    J.nod = (J.nod || 0) + (glance(t, sd + 7, 4.7) * 0.05 + br * 0.012) * amt;
+    // role fidgets
+    if (o.style === 'fielder' && ready < 0.2) {
+      // now and then, punch the glove: both hands meet in front of the belt, two soft taps
+      const ev = every(t, sd + 11, 11, 1.3), k = ev.e * amt * (1 - ready * 5);
+      if (k > 0) {
+        const gs = fig.gloveHand === 'r' ? 'r' : 'l', ts = gs === 'l' ? 'r' : 'l', gsg = gs === 'l' ? -1 : 1;
+        const belt = U.add(J.pelvis, U.add(U.scale(f, 0.26), [0, 0, 0.1]));
+        reach(J, gs, U.add(belt, U.scale(r, gsg * 0.02)), k, gsg);
+        const tap = Math.max(0, Math.sin(TAU * 2.3 * ev.tau)) * 0.035;
+        reach(J, ts, U.add(belt, U.add(U.scale(r, -gsg * 0.05), U.scale(f, 0.02 + tap))), k, -gsg);
+        J.nod += 0.12 * k; // glance down at the glove
+      }
+    } else if (o.style === 'pitcher') {
+      // taking the sign: an occasional small nod
+      const ev = every(t, sd + 13, 7, 0.7);
+      J.nod += 0.16 * ev.e * amt;
+      // between pitches: glove resting at the belt, throwing arm loose at the side (the delivery takes the
+      // hands up to the chest as this fades out)
+      const k = o.relax || 0;
+      if (k > 0) {
+        const gs = fig.gloveHand === 'r' ? 'r' : 'l', ts = gs === 'l' ? 'r' : 'l', gsg = gs === 'l' ? -1 : 1;
+        reach(J, gs, U.add(J.pelvis, U.add(U.add(U.scale(f, 0.2), U.scale(r, gsg * 0.04)), [0, 0, 0.08])), k, gsg);
+        const sh = J[ts + 'Sh'], hand = U.add(sh, U.add(U.add(U.scale(r, -gsg * 0.07), U.scale(f, -0.03)), [0, 0, -0.58]));
+        J[ts + 'Hand'] = U.lerpV(J[ts + 'Hand'], hand, k);
+        J[ts + 'Elbow'] = U.lerpV(J[ts + 'Elbow'], U.add(U.lerpV(sh, hand, 0.5), U.add(U.scale(r, -gsg * 0.025), U.scale(f, -0.02))), k);
+      }
+    } else if (o.style === 'batter') {
+      // rhythm in the knees while waiting (the bat waggle is added to the bat itself by the caller)
+      const b = Math.sin((TAU * t) / 1.45 + sd) * 0.006 * amt;
+      for (const key of ['pelvis', 'lHip', 'rHip', 'neck', 'head', 'lSh', 'rSh']) add(J, key, [0, 0, b]);
+      add(J, 'lKnee', U.scale(f, -b * 0.6)); add(J, 'rKnee', U.scale(f, -b * 0.6));
+    }
+    return J;
+  }
+  // relaxed ↔ set: hands come forward and low, ready to field (k = 0..1)
+  function readyHands(J, k, gloveHand, h = 1.85) {
+    if (k <= 0) return J;
+    const g = gloveHand === 'r' ? 'r' : 'l', gs = g === 'l' ? -1 : 1;
+    const base = U.add(J.pelvis, U.add(U.scale(J.f, 0.42), [0, 0, -0.28 * (h / 1.85)]));
+    reach(J, g, U.add(base, U.scale(J.r, gs * 0.13)), k, gs);
+    reach(J, g === 'l' ? 'r' : 'l', U.add(base, U.add(U.scale(J.r, -gs * 0.14), [0, 0, 0.04])), k, -gs);
+    return J;
+  }
+  // widen the base: feet and knees out to the sides (an infielder's set)
+  function widen(J, w) {
+    if (w <= 0) return J;
+    add(J, 'lFoot', U.scale(J.r, -w)); add(J, 'rFoot', U.scale(J.r, w));
+    add(J, 'lKnee', U.scale(J.r, -w * 0.85)); add(J, 'rKnee', U.scale(J.r, w * 0.85));
+    return J;
+  }
+  // hands on the thighs, just above the knees (the umpire's set)
+  function handsOnKnees(J, k) {
+    if (k <= 0) return J;
+    for (const [s, sg] of [['l', -1], ['r', 1]]) {
+      const kn = J[s + 'Knee'], hp = J[s + 'Hip'];
+      reach(J, s, U.add(U.lerpV(kn, hp, 0.28), U.add(U.scale(J.f, 0.05), U.scale(J.r, sg * 0.03))), k, sg);
+    }
+    return J;
+  }
+
   function setDebug(fig, on) { fig.debug = !!on; if (fig.J) { const J = fig.J; fig.J = null; fig.blend = null; poseFigure(fig, J); } }
 
-  BP.Figure = { COLORS, Pose, create, poseFigure, setTeam, setDebug, JOINTS };
+  BP.Figure = { COLORS, Pose, create, poseFigure, setTeam, setDebug, JOINTS, idle, gaze, ease, readyHands, handsOnKnees, widen };
 })(typeof window !== 'undefined' ? window : globalThis);
 
 </script>
@@ -7363,7 +7511,7 @@ body:not(.career) .careeronly { display: none !important; }
   'use strict';
   const BP = G.BP;
   const { U, Aero, Atmos, Pitching, Batting, Batted, Fielding, AI } = BP;
-  const UI = BP.UI, W = BP.Widgets, Rn = BP.Render, Audio = BP.Audio, Career = BP.Career;
+  const UI = BP.UI, W = BP.Widgets, Rn = BP.Render, Audio = BP.Audio, Career = BP.Career, Fig = BP.Figure;
   const { h } = UI;
   // the profile keys a career owns; the sandbox values wait in App.stash while Career is active
   const CAREER_KEYS = ['pitcher', 'arsenal', 'sel', 'batter', 'bat', 'swing', 'env', 'phys', 'exec', 'command', 'hitAids', 'game'];
@@ -8736,6 +8884,19 @@ body:not(.career) .careeronly { display: none !important; }
     return { knob, dir, frac: U.clamp(tau / (sw.T * 1.15), 0, 1.2) };
   }
   const _p = [0, 0, 0], _v = [0, 0, 0];
+  // a waiting hitter's bat waggle: the barrel tip circles a few degrees, the hands drift a centimetre or so.
+  // Presentation only, and faded to nothing before release, so every swing still starts from the stance.
+  const INFIELD = new Set(['1B', '2B', 'SS', '3B']);
+  function waggle(bp, k) {
+    if (k <= 1e-3) return bp;
+    const t = performance.now() / 1000, w = (Math.PI * 2) / 1.45;
+    const env = (0.6 + 0.4 * Math.sin((Math.PI * 2 * t) / 6.3)) * k;
+    let dir = U.rotate(bp.dir, [0, 0, 1], 0.11 * Math.sin(w * t) * env);
+    const ax = U.norm(U.cross(dir, [0, 0, 1]));
+    dir = U.norm(U.rotate(dir, ax, 0.06 * Math.sin(2 * w * t + 0.7) * env));
+    const knob = U.add(bp.knob, [0.01 * Math.sin(w * t + 0.5) * env, 0.004 * Math.sin(w * t) * env, 0.012 * Math.sin(w * t + 1.2) * env]);
+    return { knob, dir, frac: bp.frac };
+  }
 
   function drawScene(dtReal) {
     const S = App.S, rnd = R.render;
@@ -8759,7 +8920,16 @@ body:not(.career) .careeronly { display: none !important; }
     else if (!rp && R.phase === 'meter' && R.meter) { const m = R.meter; u = m.stage === 1 ? 0.04 + 0.16 * Math.min(1, m.t / 1.6) : m.stage === 2 ? 0.2 + 0.25 * Math.min(1, m.t / 1.3) : 0.45 + 0.55 * Math.min(1, (m.releasePos || 0) / m.releaseWindow); }
     else if (phase === 'flight' || phase === 'play' || (phase === 'result' && E)) { u = 1; v = Math.max(0, t); }
     Rn.setTeam(rnd.figs.pitcher, fieldTeam); rnd.figs.pitcher.gloveHand = pitcher.hand === 'L' ? 'r' : 'l';
-    Rn.poseFigure(rnd.figs.pitcher, Rn.Pose.pitcher({ h: (pitcher.heightIn / 12) * U.FT, hand: pitcher.hand, release: rel, u, v }));
+    // life between pitches: on the rubber taking the sign, then the idle fades out as the delivery starts
+    // (gone well before the arm moves to the release point) and back in once the follow-through settles
+    const delivering = phase === 'windup' || (!rp && R.phase === 'meter');
+    const pIdle = v > 0 ? U.smoothstep(1.0, 2.0, v) : 1 - U.smoothstep(0.02, 0.12, u);
+    const pJ = Rn.Pose.pitcher({ h: (pitcher.heightIn / 12) * U.FT, hand: pitcher.hand, release: rel, u, v });
+    Fig.idle(rnd.figs.pitcher, pJ, { amt: pIdle, style: 'pitcher', relax: v > 0 ? 0 : pIdle, sway: 0.5, look: 0.07 });
+    Fig.gaze(pJ, [0, -0.7, 0.8], 1 - 0.5 * U.smoothstep(0.1, 0.6, v)); // eyes on the target, through the delivery
+    Rn.poseFigure(rnd.figs.pitcher, pJ);
+    // how set the defence is for this pitch: 0 between pitches, rising through the delivery, 1 while it's live
+    const setFor = (a, b) => (delivering ? U.smoothstep(a, b, u) : phase === 'flight' ? 1 : 0);
     // ---- catcher & ump
     Rn.setTeam(rnd.figs.catcher, fieldTeam);
     const cJ = Rn.Pose.stand({ x: 0, y: -0.92, face: 0, h: 1.8, crouch: 1 });
@@ -8783,17 +8953,42 @@ body:not(.career) .careeronly { display: none !important; }
     const hitHappened = E && E.hit && t >= E.hit.t;
     // the batter finishes the swing, then the same player becomes the batter-runner (one figure at a time)
     const handoffT = E && E.hit ? E.hit.t + 0.45 : Infinity;
-    if (hitHappened) { const sj = Rn.Pose.stand({ x: 0, y: -0.92, face: 0, h: 1.8, crouch: 0.2 }); Rn.poseFigure(rnd.figs.catcher, sj); } else Rn.poseFigure(rnd.figs.catcher, cJ);
-    Rn.poseFigure(rnd.figs.ump, Rn.Pose.stand({ x: 0.2, y: -1.75, face: 0, h: 1.83, crouch: 0.45 }));
+    if (hitHappened) {
+      const sj = Rn.Pose.stand({ x: 0, y: -0.92, face: 0, h: 1.8, crouch: 0.2 });
+      Rn.poseFigure(rnd.figs.catcher, Fig.idle(rnd.figs.catcher, sj, { free: ['l', 'r'], look: 0.2 }));
+    } else {
+      // the mitt is the target (and later the catch), so it never drifts; the body breathes and rocks a little
+      const cSet = Fig.ease(rnd.figs.catcher, 'set', setFor(0.2, 0.7), dtReal, 4);
+      Fig.idle(rnd.figs.catcher, cJ, { free: ['r'], sway: 0.35, look: 0.08, ready: cSet });
+      Rn.poseFigure(rnd.figs.catcher, Fig.gaze(cJ, [rel[0], rel[1], rel[2] + 0.1], 1));
+    }
+    // umpire: stands relaxed between pitches, settles into the slot (hands on the thighs) as the pitcher delivers
+    const uSet = Fig.ease(rnd.figs.ump, 'set', setFor(0.15, 0.6), dtReal, 4);
+    const uJ = Rn.Pose.stand({ x: 0.2, y: -1.75, face: 0, h: 1.83, crouch: U.lerp(0.18, 0.52, uSet) });
+    Fig.handsOnKnees(uJ, uSet);
+    Fig.idle(rnd.figs.ump, uJ, { free: uSet < 0.5 ? ['l', 'r'] : [], sway: 0.6, look: 0.22, ready: uSet });
+    Rn.poseFigure(rnd.figs.ump, Fig.gaze(uJ, rel, uSet));
     // ---- batter & bat
     const batter = E ? E.batter : rl.batter;
     if (batter) {
       Rn.setTeam(rnd.figs.batter, batTeam);
       const sw = E ? E.sw : null;
-      const bp = batPose(sw, t, batter.hand);
+      let bp = batPose(sw, t, batter.hand);
+      // waiting: waggle and a little rhythm; set (still) by the pitcher's stride, so the swing starts clean
+      const preSwing = !sw || t - sw.tClick <= 0;
+      const wagRaw = !preSwing ? 0 : !E ? 1 : delivering ? 1 - U.smoothstep(0.45, 0.8, u) : 0;
+      const wag = Math.min(wagRaw, Fig.ease(rnd.figs.batter, 'wag', wagRaw, dtReal, 3));
+      if (preSwing) bp = waggle(bp, wag);
       if (hitHappened && t > handoffT && E.play && E.play.kind !== 'FOUL') { rnd.figs.batter.g.visible = false; rnd.placeBat(bp.knob, bp.dir, false); }
       else {
-        Rn.poseFigure(rnd.figs.batter, Rn.Pose.batter({ h: (batter.heightIn / 12) * U.FT, hand: batter.hand, knob: bp.knob, dir: bp.dir, frac: bp.frac, stride: sw ? 1 : 0.4 }));
+        const bJ = Rn.Pose.batter({ h: (batter.heightIn / 12) * U.FT, hand: batter.hand, knob: bp.knob, dir: bp.dir, frac: bp.frac, stride: sw ? 1 : 0.4 });
+        Fig.idle(rnd.figs.batter, bJ, { amt: wag, style: 'batter', sway: 0.35, look: 0.04 });
+        // eyes on the pitcher, then on the ball, and the head stays down through contact
+        let look = rel;
+        if (!preSwing || hitHappened) look = [0, 0.7, 0.85];
+        else if (E && E.thrown && t > 0) look = U.lerpV(rel, [0, 0.6, 0.9], U.clamp(t / Math.max(0.2, E.plateT || 0.45), 0, 1));
+        Fig.gaze(bJ, look, 1);
+        Rn.poseFigure(rnd.figs.batter, bJ);
         if (E && E.swBat && rnd.batL !== E.swBat.L) rnd.setBat(E.swBat);
         else if (!E && rnd.batL !== App.bat().L) rnd.setBat(App.bat());
         const broke = E && E.hit && E.hit.broke && t >= E.hit.t;
@@ -8810,7 +9005,18 @@ body:not(.career) .careeronly { display: none !important; }
       const show = S.mode !== 'bullpen';
       if (!show) { fig.g.visible = false; continue; }
       let x = f.x, y = f.y, face = Math.atan2(-f.x, -f.y), run = 0, ph = 0;
-      if (play) {
+      if (!play) {
+        // between pitches: relaxed, glancing around, the odd glove punch; set and low as the pitch comes
+        // infielders get down wide and low; outfielders settle into a lighter crouch
+        const fSet = Fig.ease(fig, 'set', setFor(0.4, 0.85), dtReal, 4), inf = INFIELD.has(f.pos), depth = inf ? 1 : 0.55;
+        const J = Rn.Pose.stand({ x, y, face, h: 1.85, crouch: U.lerp(0.12, inf ? 0.62 : 0.4, fSet), lean: 0.2 * fSet * depth });
+        Fig.widen(J, 0.13 * fSet * depth);
+        Fig.readyHands(J, fSet * (inf ? 1 : 0.7), fig.gloveHand, 1.85);
+        Fig.idle(fig, J, { style: 'fielder', free: fSet < 0.5 ? ['l', 'r'] : [], ready: fSet, look: 0.35 });
+        Rn.poseFigure(fig, Fig.gaze(J, [0, 0.5, 1.0], 0.4 + 0.6 * fSet));
+        continue;
+      }
+      {
         const m = play.movers.find((q) => q.pos === f.pos);
         if (m && m.t1 > m.t0) {
           const k = U.clamp((t - m.t0) / (m.t1 - m.t0), 0, 1);
@@ -8818,7 +9024,9 @@ body:not(.career) .careeronly { display: none !important; }
           if (k > 0 && k < 1) { run = 1; ph = t * 11; face = Math.atan2(m.to[0] - m.from[0], m.to[1] - m.from[1]); }
         }
       }
-      Rn.poseFigure(fig, Rn.Pose.stand({ x, y, face, h: 1.85, crouch: play ? 0.1 : 0.3, run, phase: ph }));
+      const J = Rn.Pose.stand({ x, y, face, h: 1.85, crouch: 0.1, run, phase: ph });
+      fig.ease.set = 0;
+      Rn.poseFigure(fig, run ? J : Fig.idle(fig, J, { amt: 0.5, free: ['l', 'r'], look: 0.1 }));
     }
     // ---- runners
     const runners = rnd.runners;
@@ -8854,7 +9062,12 @@ body:not(.career) .careeronly { display: none !important; }
           if (!on || ri >= 4) return;
           const b = basePos[i + 1], n = basePos[i + 2];
           const lead = 2.5, d = U.norm([n[0] - b[0], n[1] - b[1], 0]);
-          Rn.poseFigure(runners[ri++], Rn.Pose.stand({ x: b[0] + d[0] * lead, y: b[1] + d[1] * lead, face: Math.atan2(-b[0], -b[1]), h: 1.83, crouch: 0.35 }));
+          // leading off: weight shifting, eyes on the pitcher, lower and ready to go as he delivers
+          const fig = runners[ri++], rSet = Fig.ease(fig, 'set', setFor(0.3, 0.8), dtReal, 4);
+          const J = Rn.Pose.stand({ x: b[0] + d[0] * lead, y: b[1] + d[1] * lead, face: Math.atan2(-b[0], -b[1]), h: 1.83, crouch: U.lerp(0.3, 0.46, rSet) });
+          Fig.readyHands(J, rSet * 0.8, 'l', 1.83);
+          Fig.idle(fig, J, { free: rSet < 0.5 ? ['l', 'r'] : [], sway: 0.8, look: 0.12, ready: rSet });
+          Rn.poseFigure(fig, Fig.gaze(J, [0, U.RUBBER, 1.8], 0.85));
         });
       }
     }
