@@ -1,7 +1,32 @@
-<!doctype html><html><head><meta charset=utf8><meta name=viewport content="width=device-width,initial-scale=1,viewport-fit=cover"><style>:root{color-scheme:light;box-sizing:border-box;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}html{scroll-padding-top:env(safe-area-inset-top,0px)}body{margin:0;padding:0;font:14px -apple-system,BlinkMacSystemFont,sans-serif;background:#fff;color:#000}img{max-width:100%}[hidden]:not([hidden=until-found i]){display:none!important}</style></head><body>
-<title>bullpen.exe</title>
-<meta name="claude:viewport-fit-sides" content="cover">
-<meta name="description" content="A physics-driven baseball simulator: design pitches from spin, seams and air; hit by intercepting the ball with a real bat.">
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>bullpen.exe — Physics Pitching &amp; Hitting Simulator</title>
+<meta name="description" content="Design pitches from real spin, seams and air, then step in and hit them. A fluid-physics baseball sim in your browser, with a pitch lab, batting cage, full games and a career mode.">
+<link rel="canonical" href="https://vuvrtroopers.github.io/bullpen.exe/">
+<meta name="theme-color" content="#0c1215">
+<link rel="icon" href="favicon.svg" type="image/svg+xml">
+<link rel="apple-touch-icon" href="apple-touch-icon.png">
+<!-- link previews: Open Graph (Facebook, LinkedIn, Discord, Slack, iMessage, WhatsApp) -->
+<meta property="og:type" content="website">
+<meta property="og:site_name" content="bullpen.exe">
+<meta property="og:url" content="https://vuvrtroopers.github.io/bullpen.exe/">
+<meta property="og:title" content="bullpen.exe — Physics Pitching &amp; Hitting Simulator">
+<meta property="og:description" content="Design pitches from real spin, seams and air, then step in and hit them. A fluid-physics baseball sim in your browser, with a pitch lab, batting cage, full games and a career mode.">
+<meta property="og:image" content="https://vuvrtroopers.github.io/bullpen.exe/og-image.jpg?v=8a2c2d5041">
+<meta property="og:image:type" content="image/jpeg">
+<meta property="og:image:width" content="1200">
+<meta property="og:image:height" content="630">
+<meta property="og:image:alt" content="Five pitches replayed together as glowing trails from the mound to home plate under stadium lights, with the bullpen.exe wordmark.">
+<meta property="og:locale" content="en_US">
+<!-- X / Twitter -->
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" content="bullpen.exe — Physics Pitching &amp; Hitting Simulator">
+<meta name="twitter:description" content="Design pitches from real spin, seams and air, then step in and hit them. A fluid-physics baseball sim in your browser, with a pitch lab, batting cage, full games and a career mode.">
+<meta name="twitter:image" content="https://vuvrtroopers.github.io/bullpen.exe/og-image.jpg?v=8a2c2d5041">
+<meta name="twitter:image:alt" content="Five pitches replayed together as glowing trails from the mound to home plate under stadium lights, with the bullpen.exe wordmark.">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Barlow:wght@400;500;600&family=Big+Shoulders+Display:wght@600;800&family=JetBrains+Mono:wght@400;600&display=swap">
@@ -34,6 +59,9 @@
 }
 
 * { box-sizing: border-box; }
+/* `hidden` always wins over a component's own display (flex, grid…), in every build: the claude.ai host adds
+   this rule itself, the standalone and GitHub Pages builds rely on this one */
+[hidden] { display: none !important; }
 html, body { height: 100%; }
 body {
   margin: 0;
@@ -524,6 +552,8 @@ body:not(.career) .careeronly { display: none !important; }
 }
 
 </style>
+</head>
+<body>
 <div id="app">
   <header class="topbar">
     <div class="wordmark" aria-label="bullpen.exe"><b>Bullpen</b><i>.exe</i></div>
@@ -3719,7 +3749,9 @@ body:not(.career) .careeronly { display: none !important; }
       geo.setDrawRange(0, 0);
       this.mat = new THREE.ShaderMaterial({
         uniforms: { uColor: { value: new THREE.Color(1, 1, 1) }, uOpacity: { value: o.opacity != null ? o.opacity : 1 }, uWidth: { value: o.width || 4.5 }, uRes: RES, uDash: { value: new THREE.Vector2(o.dash || 0, (o.dash || 0) * 0.8) }, uCore: { value: o.core != null ? o.core : 0.6 } },
-        vertexShader: LINE_VS, fragmentShader: LINE_FS, transparent: true, depthWrite: false, toneMapped: false,
+        // the strip is widened in screen space, so its winding depends on which way the line runs on screen:
+        // draw both faces or front-face culling throws away every segment that runs the "wrong" way
+        vertexShader: LINE_VS, fragmentShader: LINE_FS, transparent: true, depthWrite: false, toneMapped: false, side: THREE.DoubleSide,
       });
       Look.glow(this.mat, o.color != null ? o.color : 0xffffff, o.glow != null ? o.glow : 0.8);
       this.mesh = new THREE.Mesh(geo, this.mat);
@@ -9636,5 +9668,5 @@ body:not(.career) .careeronly { display: none !important; }
 })(typeof window !== 'undefined' ? window : globalThis);
 
 </script>
-
-</body></html>
+</body>
+</html>
